@@ -1,0 +1,73 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and settings",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "role": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["email", "createdAt"]
+    },
+    "EncryptedDocument": {
+      "title": "EncryptedDocument",
+      "description": "AES-256-GCM encrypted document payload",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "encryptedData": { "type": "string", "maxLength": 1048576 },
+        "iv": { "type": "string", "maxLength": 100 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["title", "encryptedData", "iv", "ownerId", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable log of user actions",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string", "maxLength": 100 },
+        "resource": { "type": "string", "maxLength": 200 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string" },
+        "status": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["action", "resource", "ownerId", "createdAt", "status"]
+    },
+    "IoTSensor": {
+      "title": "IoTSensor",
+      "description": "IoT sensor configuration and state",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 50 },
+        "type": { "type": "string", "maxLength": 50 },
+        "value": { "type": "string", "maxLength": 100 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["name", "type", "value", "ownerId", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profiles"
+    },
+    "users/{userId}/documents/{documentId}": {
+      "schema": { "$ref": "#/entities/EncryptedDocument" },
+      "description": "User's encrypted files"
+    },
+    "users/{userId}/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable audit trails for compliance"
+    },
+    "users/{userId}/iot_sensors/{sensorId}": {
+      "schema": { "$ref": "#/entities/IoTSensor" },
+      "description": "IoT sensor states"
+    }
+  }
+}

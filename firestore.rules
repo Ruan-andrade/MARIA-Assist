@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'createdAt']) &&
+             data.keys().size() <= 3 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.createdAt is string;
+    }
+
+    function isValidEncryptedDocument(data, userId) {
+      return data.keys().hasAll(['title', 'encryptedData', 'iv', 'ownerId', 'createdAt', 'updatedAt']) &&
+             data.keys().size() == 6 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.encryptedData is string && data.encryptedData.size() <= 1048576 &&
+             data.iv is string && data.iv.size() <= 100 &&
+             data.ownerId == userId &&
+             data.createdAt is string &&
+             data.updatedAt is string;
+    }
+
+    function isValidAuditLog(data, userId) {
+      return data.keys().hasAll(['action', 'resource', 'ownerId', 'createdAt', 'status']) &&
+             data.keys().size() == 5 &&
+             data.action is string && data.action.size() <= 100 &&
+             data.resource is string && data.resource.size() <= 200 &&
+             data.ownerId == userId &&
+             data.createdAt is string &&
+             data.status is string && data.status.size() <= 50;
+    }
+
+    function isValidIoTSensor(data, userId) {
+      return data.keys().hasAll(['name', 'type', 'value', 'ownerId', 'updatedAt']) &&
+             data.keys().size() == 5 &&
+             data.name is string && data.name.size() <= 50 &&
+             data.type is string && data.type.size() <= 50 &&
+             data.value is string && data.value.size() <= 100 &&
+             data.ownerId == userId &&
+             data.updatedAt is string;
+    }
+
+    function isValidMemory(data, userId) {
+      return data.keys().hasAll(['content', 'category', 'ownerId', 'createdAt']) &&
+             data.keys().size() <= 5 &&
+             data.content is string && data.content.size() <= 2000 &&
+             data.category is string && data.category.size() <= 100 &&
+             data.ownerId == userId &&
+             data.createdAt is string;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidId(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['role']) && isValidUser(incoming());
+      
+      match /memories/{memoryId} {
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow get: if isOwner(userId) && isValidId(memoryId);
+        allow create: if isOwner(userId) && isValidId(memoryId) && isValidMemory(incoming(), userId) && incoming().createdAt == request.time;
+        allow update: if isOwner(userId) && isValidId(memoryId) && isValidMemory(incoming(), userId) && incoming().createdAt == existing().createdAt && incoming().ownerId == existing().ownerId;
+        allow delete: if isOwner(userId) && isValidId(memoryId);
+      }
+
+      match /documents/{documentId} {
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow get: if isOwner(userId) && isValidId(documentId);
+        allow create: if isOwner(userId) && isValidId(documentId) && isValidEncryptedDocument(incoming(), userId) && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+        allow update: if isOwner(userId) && isValidId(documentId) && isValidEncryptedDocument(incoming(), userId) && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && incoming().ownerId == existing().ownerId;
+        allow delete: if isOwner(userId) && isValidId(documentId);
+      }
+
+      match /audit_logs/{logId} {
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow get: if isOwner(userId) && isValidId(logId);
+        allow create: if isOwner(userId) && isValidId(logId) && isValidAuditLog(incoming(), userId) && incoming().createdAt == request.time;
+        // Audit logs are immutable
+      }
+
+      match /iot_sensors/{sensorId} {
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow get: if isOwner(userId) && isValidId(sensorId);
+        allow create: if isOwner(userId) && isValidId(sensorId) && isValidIoTSensor(incoming(), userId) && incoming().updatedAt == request.time;
+        allow update: if isOwner(userId) && isValidId(sensorId) && isValidIoTSensor(incoming(), userId) && incoming().updatedAt == request.time && incoming().ownerId == existing().ownerId;
+        allow delete: if isOwner(userId) && isValidId(sensorId);
+      }
+    }
+  }
+}

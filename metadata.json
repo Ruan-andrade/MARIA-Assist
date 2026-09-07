@@ -1,0 +1,6 @@
+{
+  "name": "J.A.R.V.I.S. Autonomous AI Assistant",
+  "description": "Assistente autônomo inteligente com interface HUD holográfica, voz bidirecional em tempo real, memória de longo prazo e integração de rotinas.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
