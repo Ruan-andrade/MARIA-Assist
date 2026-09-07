@@ -1,11 +1,9 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { WebSocketServer } from "ws";
-import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
-import { Server } from "http";
+import { WebSocketServer, WebSocket } from "ws";
+import { GoogleGenAI, Modality } from "@google/genai";
 import { TuyaContext } from '@tuya/tuya-connector-nodejs';
-
 import dotenv from "dotenv";
 
 dotenv.config({ path: path.join(process.cwd(), '.env.local') });
@@ -52,13 +50,14 @@ async function startServer() {
   // Attach WebSocket server for Gemini Live API
   const wss = new WebSocketServer({ server: httpServer, path: "/live" });
 
-  wss.on("connection", async (clientWs) => {
-    console.log("Client connected to /live WebSocket");
-    
+  wss.on("connection", async (clientWs, req) => {
+    console.log("Client connected to HUD WebSocket");
+    const isReconnect = req.url?.includes('reconnect=true');
     let accessToken: string | null = null;
-    const pendingToolCalls = new Map<string, any>();
+    let pendingToolCalls = new Map<string, any>();
 
     try {
+      // Connect to Gemini Live API
       const session = await ai.live.connect({
         model: "gemini-3.1-flash-live-preview",
         config: {
@@ -394,15 +393,15 @@ Se não encontrar um dispositivo na Casa Inteligente, avise o usuário quais est
       });
 
       // Send initial greeting so MARIA welcomes the user upon connection
-      session.send({
-        clientContent: {
+      if (!isReconnect) {
+        session.sendClientContent({
           turns: [{
             role: "user",
             parts: [{ text: "O usuário acabou de se conectar ao sistema. Diga uma saudação verbal concisa, elegante e cortês em português. Exemplo: 'Sistemas online. Maria à sua disposição, senhor.'" }]
           }],
           turnComplete: true
-        }
-      });
+        });
+      }
 
       clientWs.on("message", async (data) => {
         try {
@@ -449,42 +448,6 @@ Se não encontrar um dispositivo na Casa Inteligente, avise o usuário quais est
                 toolResponse = { id, name: callContext.name, response: { error: error || "Falha ao executar ação local no PC." } };
               }
               session.sendToolResponse({ functionResponses: [toolResponse] });
-              pendingToolCalls.delete(id);
-            }
-          }
-          else if (payload.type === "confirm_response") {
-            const { id, confirmed } = payload;
-            const callContext = pendingToolCalls.get(id);
-            if (callContext) {
-              let toolResponse = null;
-              if (confirmed) {
-                if (callContext.name === "create_calendar_event") {
-                  try {
-                    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events`, {
-                      method: 'POST',
-                      headers: { 
-                        Authorization: `Bearer ${accessToken}`,
-                        'Content-Type': 'application/json'
-                      },
-                      body: JSON.stringify({
-                        summary: callContext.args.summary,
-                        start: { dateTime: callContext.args.startTime },
-                        end: { dateTime: callContext.args.endTime }
-                      })
-                    });
-                    const data = await res.json();
-                    toolResponse = { id, name: callContext.name, response: { result: "Evento agendado com sucesso na sua agenda.", eventId: data.id } };
-                  } catch (err: any) {
-                    toolResponse = { id, name: callContext.name, response: { error: err.message } };
-                  }
-                }
-              } else {
-                toolResponse = { id, name: callContext.name, response: { error: "Operação cancelada pelo usuário." } };
-              }
-              
-              if (toolResponse) {
-                session.sendToolResponse({ functionResponses: [toolResponse] });
-              }
               pendingToolCalls.delete(id);
             }
           }

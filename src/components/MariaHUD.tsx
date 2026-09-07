@@ -57,6 +57,12 @@ export default function MariaHUD() {
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const recognitionRef = useRef<any>(null);
   const speakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // BUG 7 FIX: Ref to avoid stale closure on isMicMuted inside onaudioprocess
+  const isMicMutedRef = useRef(false);
+  // BUG 6 FIX: Ref to suppress auto-reconnect when user manually disconnects
+  const isManualDisconnectRef = useRef(false);
+  // BUG 5 FIX: Backoff counter for auto-reconnect
+  const reconnectAttemptsRef = useRef(0);
 
   const addLog = (msg: string) => {
     setLogs(prev => [...prev.slice(-6), `> ${msg}`]);
@@ -144,7 +150,7 @@ export default function MariaHUD() {
           .map((result: any) => result.transcript)
           .join('');
           
-        if (transcript.toLowerCase().includes('Maria') && !isConnected && !isConnecting) {
+        if (transcript.toLowerCase().includes('maria') && !isConnected && !isConnecting) {
           addLog('Palavra de ativação "Maria" detectada.');
           connectToLiveAPI();
           try { recognition.stop(); } catch(e) {}
@@ -164,7 +170,7 @@ export default function MariaHUD() {
     }
   };
 
-  const connectToLiveAPI = async () => {
+  const connectToLiveAPI = async (isReconnect: boolean = false) => {
     if (wsRef.current || isConnecting) return;
     
     setIsConnecting(true);
@@ -175,10 +181,13 @@ export default function MariaHUD() {
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const backendHost = import.meta.env.VITE_BACKEND_URL || window.location.host;
-      const ws = new WebSocket(`${backendHost.startsWith('ws') ? '' : protocol + '//'}${backendHost}/live`);
+      const wsUrl = `${protocol}//${backendHost}/live${isReconnect ? '?reconnect=true' : ''}`;
+      
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = async () => {
+        reconnectAttemptsRef.current = 0; // BUG 5 FIX: reset backoff on success
         setIsConnected(true);
         setIsConnecting(false);
         addLog('Uplink conectado. Transmissão de voz inicializada.');
@@ -217,7 +226,7 @@ export default function MariaHUD() {
           setIsListening(true);
           
           processor.onaudioprocess = (e) => {
-            if (ws.readyState === WebSocket.OPEN && !isMicMuted) {
+            if (ws.readyState === WebSocket.OPEN && !isMicMutedRef.current) {
               const base64 = pcmToBase64(e.inputBuffer.getChannelData(0));
               ws.send(JSON.stringify({ audio: base64 }));
             }
@@ -288,6 +297,11 @@ export default function MariaHUD() {
             return;
           }
           
+          if (msg.type === "log" && msg.message) {
+            addLog(msg.message);
+            return;
+          }
+
           if (msg.text) {
             addLog(`Maria: ${msg.text}`);
           }
@@ -321,13 +335,28 @@ export default function MariaHUD() {
       };
 
       ws.onclose = () => {
+        if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
         setIsConnected(false);
         setIsConnecting(false);
-        setIsListening(false);
         setIsSpeaking(false);
-        addLog('Uplink desconectado.');
+        wsRef.current = null;
         cleanupAudio();
-        startWakeWordDetection();
+
+        // BUG 6: Don't reconnect if the user clicked "Disconnect" manually
+        if (isManualDisconnectRef.current) {
+          isManualDisconnectRef.current = false;
+          addLog('Sessão encerrada pelo operador.');
+          return;
+        }
+
+        // BUG 5: Exponential backoff (3s, 6s, 12s, max 60s)
+        const attempt = reconnectAttemptsRef.current;
+        const delay = Math.min(3000 * Math.pow(2, attempt), 60000);
+        reconnectAttemptsRef.current = attempt + 1;
+        addLog(`Uplink desconectado. Reconectando em ${Math.round(delay/1000)}s...`);
+        setTimeout(() => {
+          connectToLiveAPI(true);
+        }, delay);
       };
     } catch (err: any) {
       console.error("Failed to connect:", err);
@@ -358,6 +387,8 @@ export default function MariaHUD() {
   };
 
   const handleDisconnect = () => {
+    isManualDisconnectRef.current = true; // BUG 6 FIX: signal not to auto-reconnect
+    reconnectAttemptsRef.current = 0;
     if (wsRef.current) {
       wsRef.current.close();
     }
@@ -418,9 +449,11 @@ export default function MariaHUD() {
     }
   };
 
-  const toggleMic = () => {
-    setIsMicMuted(prev => !prev);
-    addLog(isMicMuted ? 'Microfone reativado.' : 'Microfone pausado.');
+  const handleMuteToggle = () => {
+    const newMuted = !isMicMuted;
+    setIsMicMuted(newMuted);
+    isMicMutedRef.current = newMuted; // BUG 7 FIX: keep ref in sync
+    addLog(newMuted ? 'Microfone silenciado.' : 'Microfone reativado.');
   };
 
   return (
@@ -534,7 +567,7 @@ export default function MariaHUD() {
               <div className="flex gap-2">
                 <button 
                   id="mute-mic-btn"
-                  onClick={toggleMic}
+                  onClick={handleMuteToggle}
                   className={cn(
                     "flex-1 border py-2.5 px-3 text-[11px] uppercase tracking-wider font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
                     isMicMuted 
