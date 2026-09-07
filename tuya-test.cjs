@@ -14,12 +14,17 @@ async function test() {
     console.log(JSON.stringify(res, null, 2));
     
     if (res.result && res.result.uid) {
-      console.log('Fetching all devices for UID:', res.result.uid);
-      const devices = await tuya.request({
-        method: 'GET',
-        path: `/v1.0/users/${res.result.uid}/devices`
-      });
-      console.log(JSON.stringify(devices, null, 2));
+      console.log(`Sending command to lamp...`);
+  const cmdRes = await tuya.request({
+    method: 'POST',
+    path: `/v1.0/devices/ebd940c73ab69bf674q1fr/commands`,
+    body: {
+      commands: [
+        { code: 'switch_led', value: false }
+      ]
+    }
+  });
+  console.log(JSON.stringify(cmdRes, null, 2));
     }
   } catch (error) {
     console.error(error);
