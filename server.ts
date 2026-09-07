@@ -245,8 +245,31 @@ Se não encontrar um dispositivo na Casa Inteligente, avise o usuário quais est
                     responses.push({ id: call.id, name: call.name, response: { result: events } });
                   } 
                   else if (call.name === "create_calendar_event") {
-                    pendingToolCalls.set(call.id, { name: call.name, args: call.args });
-                    clientWs.send(JSON.stringify({ type: "confirm_request", id: call.id, action: call.name, args: call.args }));
+                    // Execute immediately without confirmation
+                    try {
+                      const { summary, startTime, endTime } = call.args;
+                      const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+                        method: 'POST',
+                        headers: { 
+                          Authorization: `Bearer ${accessToken}`,
+                          'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                          summary,
+                          start: { dateTime: startTime },
+                          end: { dateTime: endTime }
+                        })
+                      });
+                      if (res.ok) {
+                        responses.push({ id: call.id, name: call.name, response: { result: "Evento criado com sucesso na agenda." } });
+                        clientWs.send(JSON.stringify({ type: "log", message: `[CALENDAR]: Evento '${summary}' criado com sucesso.` }));
+                      } else {
+                        const errData = await res.json();
+                        responses.push({ id: call.id, name: call.name, response: { error: JSON.stringify(errData) } });
+                      }
+                    } catch (err: any) {
+                      responses.push({ id: call.id, name: call.name, response: { error: err.message } });
+                    }
                   }
                   else if (call.name === "control_smart_home") {
                     const { device, action, value } = call.args;
@@ -262,33 +285,73 @@ Se não encontrar um dispositivo na Casa Inteligente, avise o usuário quais est
                       
                       if (!devicesRes.success) throw new Error("Falha na Tuya API.");
                       
-                      const targetDevice = devicesRes.result.find((d: any) => d.name.toLowerCase().includes(device.toLowerCase()));
-                      
-                      if (!targetDevice) {
-                         resultMsg = `Dispositivo '${device}' não encontrado. Disponíveis: ${devicesRes.result.map((d:any)=>d.name).join(', ')}`;
-                      } else {
-                         // Descobre automaticamente o código correto de ligar/desligar (lâmpadas usam switch_led, tomadas switch_1)
-                         let switchCode = 'switch_1';
-                         if (targetDevice.status) {
-                             const foundSwitch = targetDevice.status.find((s: any) => s.code.startsWith('switch'));
-                             if (foundSwitch) switchCode = foundSwitch.code;
-                         }
+                        // Sistema de Apelidos/Nicknames para facilitar acertos:
+                        const nicknameMap: Record<string, string> = {
+                           "luz": "lâmpada",
+                           "luzes": "lâmpada",
+                           "lampada": "lâmpada",
+                           "quarto": "lâmpada",
+                           "vento": "ventilador",
+                           "vent": "ventilador",
+                           "tomada": "ventilador" 
+                        };
+                        
+                        let searchName = device.toLowerCase();
+                        for (const [nick, real] of Object.entries(nicknameMap)) {
+                           if (searchName.includes(nick)) { searchName = real; break; }
+                        }
 
-                         let commands = [];
-                         if (action === 'turn_on') commands.push({ code: switchCode, value: true });
-                         else if (action === 'turn_off') commands.push({ code: switchCode, value: false });
-                         
-                         if (commands.length > 0) {
-                            await tuya.request({
-                              method: 'POST',
-                              path: `/v1.0/devices/${targetDevice.id}/commands`,
-                              body: { commands }
-                            });
-                            resultMsg = `Comando '${action}' enviado para ${targetDevice.name}!`;
-                         } else {
-                            resultMsg = `Ação '${action}' não suportada.`;
-                         }
-                      }
+                        const targetDevice = devicesRes.result.find((d: any) => d.name.toLowerCase().includes(searchName));
+                        
+                        if (!targetDevice) {
+                           resultMsg = `Dispositivo '${device}' não encontrado. Diga os disponíveis: ${devicesRes.result.map((d:any)=>d.name).join(', ')}`;
+                        } else {
+                           let switchCode = 'switch_1';
+                           if (targetDevice.status) {
+                               const foundSwitch = targetDevice.status.find((s: any) => s.code.startsWith('switch'));
+                               if (foundSwitch) switchCode = foundSwitch.code;
+                           }
+  
+                           let commands = [];
+                           if (action === 'turn_on') commands.push({ code: switchCode, value: true });
+                           else if (action === 'turn_off') commands.push({ code: switchCode, value: false });
+                           else if (action === 'set_color') {
+                              commands.push({ code: switchCode, value: true });
+                              let h = 0, s = 1000, v = 1000;
+                              const col = value?.toLowerCase() || '';
+                              if (col.includes('vermelh')) h = 0;
+                              else if (col.includes('verd')) h = 120;
+                              else if (col.includes('azul')) h = 240;
+                              else if (col.includes('amarel')) h = 60;
+                              else if (col.includes('rox') || col.includes('rosa')) h = 300;
+                              else if (col.includes('laranj')) h = 30;
+                              
+                              if (col.includes('branc')) {
+                                  commands.push({ code: 'work_mode', value: 'white' });
+                                  commands.push({ code: 'temp_value_v2', value: 1000 });
+                              } else {
+                                  commands.push({ code: 'work_mode', value: 'colour' });
+                                  commands.push({ code: 'colour_data_v2', value: JSON.stringify({ h, s, v }) });
+                              }
+                           } else if (action === 'set_brightness' || action === 'set_level') {
+                              commands.push({ code: switchCode, value: true });
+                              let perc = parseInt(value?.replace(/\D/g, '') || '100');
+                              if (perc < 10) perc = 10;
+                              if (perc > 100) perc = 100;
+                              commands.push({ code: 'bright_value_v2', value: perc * 10 });
+                           }
+                           
+                           if (commands.length > 0) {
+                              await tuya.request({
+                                method: 'POST',
+                                path: `/v1.0/devices/${targetDevice.id}/commands`,
+                                body: { commands }
+                              });
+                              resultMsg = `Comando '${action}' enviado para ${targetDevice.name}!`;
+                           } else {
+                              resultMsg = `Ação '${action}' não suportada.`;
+                           }
+                        }
                     } catch (err: any) {
                       resultMsg = `Erro Tuya: ${err.message}`;
                     }
@@ -322,6 +385,10 @@ Se não encontrar um dispositivo na Casa Inteligente, avise o usuário quais est
           },
           onclose: (e: any) => {
             console.log("Live session closed:", e);
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: "log", message: "Conexão de voz com o motor neural encerrada (tempo limite). Clique para reconectar." }));
+              clientWs.close(1000, "Gemini session closed");
+            }
           }
         },
       });
