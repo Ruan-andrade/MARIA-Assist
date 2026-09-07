@@ -57,6 +57,12 @@ export default function MariaHUD() {
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const recognitionRef = useRef<any>(null);
   const speakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // BUG 7 FIX: Ref to avoid stale closure on isMicMuted inside onaudioprocess
+  const isMicMutedRef = useRef(false);
+  // BUG 6 FIX: Ref to suppress auto-reconnect when user manually disconnects
+  const isManualDisconnectRef = useRef(false);
+  // BUG 5 FIX: Backoff counter for auto-reconnect
+  const reconnectAttemptsRef = useRef(0);
 
   const addLog = (msg: string) => {
     setLogs(prev => [...prev.slice(-6), `> ${msg}`]);
@@ -144,7 +150,7 @@ export default function MariaHUD() {
           .map((result: any) => result.transcript)
           .join('');
           
-        if (transcript.toLowerCase().includes('Maria') && !isConnected && !isConnecting) {
+        if (transcript.toLowerCase().includes('maria') && !isConnected && !isConnecting) {
           addLog('Palavra de ativação "Maria" detectada.');
           connectToLiveAPI();
           try { recognition.stop(); } catch(e) {}
@@ -164,7 +170,7 @@ export default function MariaHUD() {
     }
   };
 
-  const connectToLiveAPI = async () => {
+  const connectToLiveAPI = async (isReconnect: boolean = false) => {
     if (wsRef.current || isConnecting) return;
     
     setIsConnecting(true);
@@ -175,10 +181,13 @@ export default function MariaHUD() {
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const backendHost = import.meta.env.VITE_BACKEND_URL || window.location.host;
-      const ws = new WebSocket(`${backendHost.startsWith('ws') ? '' : protocol + '//'}${backendHost}/live`);
+      const wsUrl = `${protocol}//${backendHost}/live${isReconnect ? '?reconnect=true' : ''}`;
+      
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = async () => {
+        reconnectAttemptsRef.current = 0; // BUG 5 FIX: reset backoff on success
         setIsConnected(true);
         setIsConnecting(false);
         addLog('Uplink conectado. Transmissão de voz inicializada.');
@@ -217,7 +226,7 @@ export default function MariaHUD() {
           setIsListening(true);
           
           processor.onaudioprocess = (e) => {
-            if (ws.readyState === WebSocket.OPEN && !isMicMuted) {
+            if (ws.readyState === WebSocket.OPEN && !isMicMutedRef.current) {
               const base64 = pcmToBase64(e.inputBuffer.getChannelData(0));
               ws.send(JSON.stringify({ audio: base64 }));
             }
@@ -288,6 +297,11 @@ export default function MariaHUD() {
             return;
           }
           
+          if (msg.type === "log" && msg.message) {
+            addLog(msg.message);
+            return;
+          }
+
           if (msg.text) {
             addLog(`Maria: ${msg.text}`);
           }
@@ -321,13 +335,28 @@ export default function MariaHUD() {
       };
 
       ws.onclose = () => {
+        if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
         setIsConnected(false);
         setIsConnecting(false);
-        setIsListening(false);
         setIsSpeaking(false);
-        addLog('Uplink desconectado.');
+        wsRef.current = null;
         cleanupAudio();
-        startWakeWordDetection();
+
+        // BUG 6: Don't reconnect if the user clicked "Disconnect" manually
+        if (isManualDisconnectRef.current) {
+          isManualDisconnectRef.current = false;
+          addLog('Sessão encerrada pelo operador.');
+          return;
+        }
+
+        // BUG 5: Exponential backoff (3s, 6s, 12s, max 60s)
+        const attempt = reconnectAttemptsRef.current;
+        const delay = Math.min(3000 * Math.pow(2, attempt), 60000);
+        reconnectAttemptsRef.current = attempt + 1;
+        addLog(`Uplink desconectado. Reconectando em ${Math.round(delay/1000)}s...`);
+        setTimeout(() => {
+          connectToLiveAPI(true);
+        }, delay);
       };
     } catch (err: any) {
       console.error("Failed to connect:", err);
@@ -358,6 +387,8 @@ export default function MariaHUD() {
   };
 
   const handleDisconnect = () => {
+    isManualDisconnectRef.current = true; // BUG 6 FIX: signal not to auto-reconnect
+    reconnectAttemptsRef.current = 0;
     if (wsRef.current) {
       wsRef.current.close();
     }
@@ -367,10 +398,17 @@ export default function MariaHUD() {
     setIsSpeaking(false);
   };
 
-  const handleConfirm = (confirmed: boolean) => {
-    if (confirmDialog && wsRef.current) {
-      wsRef.current.send(JSON.stringify({ type: "confirm_response", id: confirmDialog.id, confirmed }));
-      addLog(`Ação ${confirmed ? 'autorizada' : 'recusada'} pelo operador.`);
+  const handleConfirm = (approved: boolean) => {
+    if (wsRef.current && confirmDialog) {
+      if (approved && confirmDialog.action === 'open_browser') {
+        window.open(confirmDialog.args.url, '_blank');
+      }
+      wsRef.current.send(JSON.stringify({
+        type: "confirm_response",
+        id: confirmDialog.id,
+        confirmed: approved
+      }));
+      addLog(`Ação ${approved ? 'autorizada' : 'recusada'} pelo operador.`);
       setConfirmDialog(null);
     }
   };
@@ -411,9 +449,11 @@ export default function MariaHUD() {
     }
   };
 
-  const toggleMic = () => {
-    setIsMicMuted(prev => !prev);
-    addLog(isMicMuted ? 'Microfone reativado.' : 'Microfone pausado.');
+  const handleMuteToggle = () => {
+    const newMuted = !isMicMuted;
+    setIsMicMuted(newMuted);
+    isMicMutedRef.current = newMuted; // BUG 7 FIX: keep ref in sync
+    addLog(newMuted ? 'Microfone silenciado.' : 'Microfone reativado.');
   };
 
   return (
@@ -423,30 +463,35 @@ export default function MariaHUD() {
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#06b6d405_1px,transparent_1px),linear-gradient(to_bottom,#06b6d405_1px,transparent_1px)] bg-[size:32px_32px] pointer-events-none" />
 
       {/* TOP HUD HEADER */}
-      <header className='flex flex-wrap justify-between items-center gap-4 mb-4 z-10 pb-3 border-b border-cyan-500/20 shrink-0'>
-        <div className='flex items-center space-x-4'>
-          <div className='w-10 h-10 border border-cyan-400/50 flex items-center justify-center rounded-sm bg-cyan-950/40 shadow-[0_0_15px_rgba(6,182,212,0.2)]'>
+      <header className='flex justify-between items-center gap-2 mb-3 z-10 pb-3 border-b border-cyan-500/20 shrink-0'>
+        {/* Logo + Status */}
+        <div className='flex items-center gap-2 min-w-0'>
+          <div className='w-8 h-8 md:w-10 md:h-10 border border-cyan-400/50 flex items-center justify-center rounded-sm bg-cyan-950/40 shadow-[0_0_15px_rgba(6,182,212,0.2)] shrink-0'>
             <div className={cn(
-              'w-5 h-5 border-2 rounded-full transition-all duration-500',
+              'w-4 h-4 md:w-5 md:h-5 border-2 rounded-full transition-all duration-500',
               isConnected 
                 ? 'border-cyan-400 bg-cyan-400/30 animate-pulse shadow-[0_0_10px_rgba(34,211,238,0.8)]' 
                 : 'border-cyan-800'
             )} />
           </div>
-          <div>
-            <div className='flex items-center gap-2'>
-              <h1 className='text-[10px] font-bold tracking-[0.25em] uppercase text-cyan-400/70'>SISTEMA AUTÔNOMO DE IA</h1>
-              <span className='inline-block w-1.5 h-1.5 rounded-full bg-cyan-400'></span>
-              <span className='text-[9px] font-mono tracking-widest text-cyan-500/60 uppercase'>MARK VII</span>
-            </div>
-            <p className='text-xl font-light tracking-tight text-white flex items-center gap-2'>
-              MARIA <span className='text-cyan-400 font-mono text-sm px-1.5 py-0.5 border border-cyan-500/30 bg-cyan-950/40'>ONLINE</span>
+          <div className='min-w-0'>
+            <div className='text-[8px] md:text-[10px] font-bold tracking-[0.2em] uppercase text-cyan-400/70 truncate'>RS SISTEMAS · IA AUTÔNOMA</div>
+            <p className='text-base md:text-xl font-light tracking-tight text-white flex items-center gap-1.5'>
+              MARIA
+              <span className={cn(
+                'font-mono text-[10px] md:text-sm px-1 py-0.5 border',
+                isConnected ? 'text-green-400 border-green-500/30 bg-green-950/40' : 'text-cyan-400 border-cyan-500/30 bg-cyan-950/40'
+              )}>
+                {isConnected ? 'ONLINE' : 'STANDBY'}
+              </span>
             </p>
           </div>
         </div>
 
-        <div className='flex items-center gap-6 text-[10px] tracking-widest uppercase font-mono'>
-          <div className='flex flex-col items-end border-r border-cyan-500/20 pr-4'>
+        {/* Right side — compact on mobile */}
+        <div className='flex items-center gap-2 md:gap-6 text-[9px] md:text-[10px] tracking-widest uppercase font-mono shrink-0'>
+          {/* Google — desktop only */}
+          <div className='hidden md:flex flex-col items-end border-r border-cyan-500/20 pr-4'>
             <span className='opacity-40'>Google Workspace</span>
             <span className={user ? 'text-cyan-400 flex items-center gap-1 font-semibold' : 'text-orange-400'}>
               {user ? (
@@ -456,51 +501,61 @@ export default function MariaHUD() {
                     <LogOut className="w-3 h-3 inline" />
                   </button>
                 </>
-              ) : (
-                'Desconectado'
-              )}
+              ) : 'Desconectado'}
             </span>
           </div>
 
-          <div className='flex flex-col items-end border-r border-cyan-500/20 pr-4'>
+          {/* Voice status — desktop only */}
+          <div className='hidden md:flex flex-col items-end border-r border-cyan-500/20 pr-4'>
             <span className='opacity-40'>Canal de Voz</span>
             <span className={isConnected ? 'text-green-400 flex items-center gap-1' : 'text-cyan-700'}>
               <Radio className="w-3 h-3" />
-              {isConnected ? 'Ativo (Gemini 3.1 Live)' : 'Standby'}
+              {isConnected ? 'Ativo' : 'Standby'}
             </span>
           </div>
 
-          <div className='flex flex-col items-end border-r border-cyan-500/20 pr-4'>
+          {/* PC control — desktop only */}
+          <div className='hidden md:flex flex-col items-end border-r border-cyan-500/20 pr-4'>
             <span className='opacity-40'>Controle do PC</span>
             <button 
               onClick={() => setIsDesktopModalOpen(true)}
               className="flex items-center gap-1.5 hover:text-white transition-colors cursor-pointer group"
-              title="Configurar integração nativa com PC / Electron"
             >
-              <Laptop className="w-3 h-3 text-cyan-400 group-hover:scale-110 transition-transform" />
-              <span className={cn(
-                'font-semibold',
-                desktopMode === 'electron' ? 'text-green-400' : desktopMode === 'daemon' ? 'text-cyan-400 animate-pulse' : 'text-yellow-400'
-              )}>
-                {desktopMode === 'electron' ? 'NATIVO ELECTRON' : desktopMode === 'daemon' ? 'PC CONECTADO' : 'CONECTAR PC'}
+              <Laptop className="w-3 h-3 text-cyan-400" />
+              <span className={cn('font-semibold', desktopMode === 'electron' ? 'text-green-400' : desktopMode === 'daemon' ? 'text-cyan-400' : 'text-yellow-400')}>
+                {desktopMode === 'electron' ? 'NATIVO' : desktopMode === 'daemon' ? 'CONECTADO' : 'CONECTAR'}
               </span>
             </button>
           </div>
 
+          {/* Uplink — always visible, compact on mobile */}
           <div className='flex flex-col items-end'>
-            <span className='opacity-40'>Estado do Uplink</span>
+            <span className='opacity-40 hidden md:block'>Uplink</span>
             <span className={isConnected ? 'text-cyan-400 font-bold' : isConnecting ? 'text-yellow-400 animate-pulse' : 'text-orange-400'}>
-              {isConnected ? '● CONECTADO' : isConnecting ? 'CONECTANDO...' : '○ DESCONECTADO'}
+              {isConnected ? '● ON' : isConnecting ? '...' : '○ OFF'}
             </span>
           </div>
+
+          {/* Google login icon — mobile only */}
+          {!user && (
+            <button onClick={handleLogin} className='md:hidden flex items-center gap-1 text-orange-400 border border-orange-400/30 px-1.5 py-1 rounded-sm'>
+              <LogIn className="w-3 h-3" />
+            </button>
+          )}
+          {user && (
+            <button onClick={handleLogout} className='md:hidden text-cyan-400'>
+              <LogOut className="w-3 h-3" />
+            </button>
+          )}
         </div>
       </header>
+
 
       {/* MAIN 3-COLUMN LAYOUT */}
       <main className='flex-1 grid grid-cols-12 gap-4 md:gap-6 z-10 overflow-hidden'>
         
-        {/* LEFT COLUMN: Controls & Core Memories */}
-        <section className='col-span-12 lg:col-span-3 flex flex-col space-y-4 overflow-hidden'>
+        {/* LEFT COLUMN: Controls & Core Memories — hidden on mobile */}
+        <section className='hidden lg:flex col-span-12 lg:col-span-3 flex-col space-y-4 overflow-hidden'>
           
           {/* Main Action Connection Controls */}
           <div className='bg-cyan-950/20 border border-cyan-500/30 p-4 rounded-sm flex flex-col gap-3 shadow-[0_0_20px_rgba(6,182,212,0.05)]'>
@@ -527,7 +582,7 @@ export default function MariaHUD() {
               <div className="flex gap-2">
                 <button 
                   id="mute-mic-btn"
-                  onClick={toggleMic}
+                  onClick={handleMuteToggle}
                   className={cn(
                     "flex-1 border py-2.5 px-3 text-[11px] uppercase tracking-wider font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
                     isMicMuted 
@@ -634,16 +689,18 @@ export default function MariaHUD() {
           {/* Quick Action Chips */}
           <div className="py-2 flex flex-wrap gap-2 justify-center shrink-0">
             {[
-              { label: '🌐 Abrir Navegador', cmd: 'Maria, abra o navegador de internet e busque novidades de tecnologia.' },
-              { label: '📁 Criar Pasta no PC', cmd: 'Maria, crie uma pasta chamada Maria_Workspace no meu computador.' },
-              { label: '🔍 Pesquisa Autônoma', cmd: 'Maria, pesquise na internet sobre os avanços recentes em IA.' },
+              { label: '💡 Ligar Luz', cmd: 'Maria, ligue a lâmpada do quarto.' },
+              { label: '🌙 Apagar Luz', cmd: 'Maria, apague a lâmpada do quarto.' },
+              { label: '🔴 Luz Vermelha', cmd: 'Maria, coloque a lâmpada do quarto em vermelho.' },
+              { label: '⚪ Luz Branca', cmd: 'Maria, coloque a lâmpada do quarto em branco.' },
+              { label: '🌡️ 30% Brilho', cmd: 'Maria, coloque o brilho da lâmpada em 30%.' },
+              { label: '🔎 Pesquisar', cmd: 'Maria, pesquise na internet sobre as últimas notícias do Brasil.' },
               { label: '📅 Agenda Hoje', cmd: 'Maria, quais são os meus compromissos de hoje na agenda?' },
-              { label: '⚡ Status do Sistema', cmd: 'Maria, forneça um diagnóstico dos sistemas locais e de rede.' },
             ].map((item, idx) => (
               <button
                 key={idx}
                 onClick={() => handleSendCommand(item.cmd)}
-                className="text-[10px] uppercase font-mono px-2.5 py-1 border border-cyan-500/30 hover:border-cyan-400 bg-cyan-950/30 hover:bg-cyan-500/10 text-cyan-300 transition-colors cursor-pointer rounded-sm"
+                className="text-[10px] uppercase font-mono px-2.5 py-1.5 border border-cyan-500/30 hover:border-cyan-400 bg-cyan-950/30 hover:bg-cyan-500/10 text-cyan-300 transition-colors cursor-pointer rounded-sm"
               >
                 {item.label}
               </button>
@@ -708,8 +765,8 @@ export default function MariaHUD() {
           </form>
         </section>
 
-        {/* RIGHT COLUMN: Agenda, Sensors & System Telemetry */}
-        <section className='col-span-12 lg:col-span-3 flex flex-col space-y-4 overflow-hidden'>
+        {/* RIGHT COLUMN: Agenda, Sensors & System Telemetry — hidden on mobile */}
+        <section className='hidden lg:flex col-span-12 lg:col-span-3 flex-col space-y-4 overflow-hidden'>
           
           {/* Agenda & Automation Tasks */}
           <div className='bg-cyan-950/10 border border-cyan-500/20 p-4 flex-1 flex flex-col rounded-sm overflow-hidden'>
@@ -777,9 +834,9 @@ export default function MariaHUD() {
       </main>
 
       {/* FOOTER */}
-      <footer className='mt-3 pt-2 border-t border-cyan-500/20 flex flex-wrap justify-between items-center text-[9px] tracking-widest uppercase opacity-40 z-10 font-mono'>
-        <div>Maria AI SYSTEM | ARQUITETURA AUTÔNOMA</div>
-        <div>STARK INDUSTRIES HUD SPECIFICATION</div>
+      <footer className='mt-2 pt-2 border-t border-cyan-500/20 flex flex-wrap justify-between items-center text-[8px] tracking-widest uppercase opacity-30 z-10 font-mono shrink-0'>
+        <div>MARIA AI · RS SISTEMAS © 2026</div>
+        <div className='hidden md:block'>GEMINI 3.1 LIVE · TUYA IOT · FIREBASE</div>
       </footer>
 
       {/* CONFIRMATION DIALOG MODAL */}
