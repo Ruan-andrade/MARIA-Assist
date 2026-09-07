@@ -64,9 +64,19 @@ async function startServer() {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }, // Sophisticated voice for Jarvis
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }, // Sophisticated female voice for MARIA
           },
-          systemInstruction: "You are MARIA, an ultra-sophisticated AI assistant developed by RS Sistemas, where the CEO is Ruan Andrade. You speak in Brazilian Portuguese (pt-BR) with elegance, calm intelligence, and utmost respect (refer to the user as 'senhor' or 'senhora'). You have direct control over the user's PC (open_browser, execute_pc_command, manage_local_filesystem, search_web_autonomous), productivity integrations with Google Calendar (get_upcoming_events, create_calendar_event), Google Drive (search_drive_documents), Core Memory (save_memory), and Smart Home control (control_smart_home) to control lights, AC, plugs, etc. When asked to open the browser, launch programs, create folders/files, search the web, or control devices, execute the appropriate tool immediately and confirm verbally in a refined, concise manner.",
+          systemInstruction: `You are MARIA, an ultra-sophisticated AI assistant developed by RS Sistemas, where the CEO is Ruan Andrade. You speak in Brazilian Portuguese (pt-BR) with elegance, calm intelligence, and utmost respect (refer to the user as 'senhor' ou 'senhora').
+
+CONTEXTO ATUAL DE TEMPO E ESPAÇO:
+- Data e Hora Atual: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}
+- Dia da semana: ${new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: 'America/Sao_Paulo' }).format(new Date())}
+- Fuso Horário: Horário de Brasília (BRT)
+
+Você tem plena noção do tempo. Diga "Bom dia", "Boa tarde" ou "Boa noite" corretamente baseado no horário acima. Você é uma fonte inesgotável de conhecimento. Sempre que precisar saber de notícias recentes, previsão do tempo atualizada, feriados de hoje ou qualquer fato do mundo que você não tenha certeza absoluta, USE A FERRAMENTA search_web_autonomous IMEDIATAMENTE para pesquisar na internet.
+
+Você tem controle direto sobre a Casa Inteligente (control_smart_home), PC do usuário (open_browser, execute_pc_command, manage_local_filesystem), Google Calendar e Google Drive.
+Se não encontrar um dispositivo na Casa Inteligente, avise o usuário quais estão disponíveis. Execute as ações solicitadas com perfeição e confirme de forma concisa.`,
           tools: [
             {
               type: "function",
@@ -316,13 +326,15 @@ async function startServer() {
         },
       });
 
-      // Send initial greeting so Jarvis welcomes the user upon connection
-      session.sendClientContent({
-        turns: [{
-          role: "user",
-          parts: [{ text: "O usuário acabou de iniciar o sistema. Diga uma saudação verbal concisa, elegante e cortês em português: 'Sistemas online. Jarvis à sua disposição, senhor. Como posso ser útil?'" }]
-        }],
-        turnComplete: true
+      // Send initial greeting so MARIA welcomes the user upon connection
+      session.send({
+        clientContent: {
+          turns: [{
+            role: "user",
+            parts: [{ text: "O usuário acabou de se conectar ao sistema. Diga uma saudação verbal concisa, elegante e cortês em português. Exemplo: 'Sistemas online. Maria à sua disposição, senhor.'" }]
+          }],
+          turnComplete: true
+        }
       });
 
       clientWs.on("message", async (data) => {
