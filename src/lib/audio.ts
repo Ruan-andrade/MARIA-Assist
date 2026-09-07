@@ -60,7 +60,9 @@ export class AudioStreamPlayer {
       source.connect(ctx.destination);
       
       if (this.nextTime < ctx.currentTime) {
-        this.nextTime = ctx.currentTime;
+        // Se a fila esvaziar, adicionamos um atraso artificial de 200ms (Jitter Buffer)
+        // para dar tempo de receber os próximos pacotes da rede e evitar o picotamento.
+        this.nextTime = ctx.currentTime + 0.2;
       }
       
       source.start(this.nextTime);

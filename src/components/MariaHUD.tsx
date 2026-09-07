@@ -367,10 +367,17 @@ export default function MariaHUD() {
     setIsSpeaking(false);
   };
 
-  const handleConfirm = (confirmed: boolean) => {
-    if (confirmDialog && wsRef.current) {
-      wsRef.current.send(JSON.stringify({ type: "confirm_response", id: confirmDialog.id, confirmed }));
-      addLog(`Ação ${confirmed ? 'autorizada' : 'recusada'} pelo operador.`);
+  const handleConfirm = (approved: boolean) => {
+    if (wsRef.current && confirmDialog) {
+      if (approved && confirmDialog.action === 'open_browser') {
+        window.open(confirmDialog.args.url, '_blank');
+      }
+      wsRef.current.send(JSON.stringify({
+        type: "confirm_response",
+        id: confirmDialog.id,
+        confirmed: approved
+      }));
+      addLog(`Ação ${approved ? 'autorizada' : 'recusada'} pelo operador.`);
       setConfirmDialog(null);
     }
   };
@@ -417,7 +424,7 @@ export default function MariaHUD() {
   };
 
   return (
-    <div className="bg-[#03070b] text-cyan-50 font-sans h-screen w-full flex flex-col p-4 md:p-6 border-4 border-[#0a1a2f] relative overflow-hidden selection:bg-cyan-900 select-none">
+    <div className="bg-[#03070b] text-cyan-50 font-sans h-full w-full flex flex-col p-2 md:p-6 border-0 md:border-4 border-[#0a1a2f] relative overflow-x-hidden overflow-y-auto md:overflow-hidden selection:bg-cyan-900 select-none">
       {/* HUD Background Grid & Glow */}
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(6,182,212,0.06),transparent_75%)] pointer-events-none" />
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#06b6d405_1px,transparent_1px),linear-gradient(to_bottom,#06b6d405_1px,transparent_1px)] bg-[size:32px_32px] pointer-events-none" />
